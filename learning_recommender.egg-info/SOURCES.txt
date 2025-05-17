@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+learning_recommender/__init__.py
+learning_recommender.egg-info/PKG-INFO
+learning_recommender.egg-info/SOURCES.txt
+learning_recommender.egg-info/dependency_links.txt
+learning_recommender.egg-info/top_level.txt
+tests/test_rule_engine.py
