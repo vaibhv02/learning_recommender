@@ -3,19 +3,14 @@ import pandas as pd
 import numpy as np
 import time
 import threading
+import requests
 from learning_recommender.recommender.rule_based import compute_mastery, recommend_next_topics, topic_map
 from learning_recommender.recommender.collaborative import CollaborativeFilteringRecommender
 from learning_recommender.recommender.models import User, Topic, UserProgress
-from learning_recommender.recommender.chatbot import TopicChatbot, get_extended_knowledge_base
-from learning_recommender.recommender.rasa_chatbot import RasaChatbot, create_rasa_chatbot
+from learning_recommender.recommender.deepseek_chatbot import DeepSeekChatbot
 
 # App title and description
 st.set_page_config(page_title="Learning Path Recommender System", layout="wide")
-st.title("Learning Path Recommender System")
-st.markdown("""
-This system provides personalized learning recommendations for B.Tech CSE fundamentals.
-It uses both rule-based and collaborative filtering techniques to suggest the most relevant topics.
-""")
 
 # Sample data - in a real app, this would come from a database
 sample_users = {
@@ -46,19 +41,52 @@ sample_users = {
 user_topic_matrix = {user_id: data["mastery"] for user_id, data in sample_users.items()}
 cf_recommender = CollaborativeFilteringRecommender(user_topic_matrix)
 
-# Initialize the chatbot with extended knowledge base and web search capability
-original_chatbot = TopicChatbot(get_extended_knowledge_base(), use_web_search=True)
-rasa_chatbot = None  # Will be initialized only when needed
-active_chatbot = "original"  # Keep track of which chatbot is active
+# Add DeepSeek chatbot instance
+ollama_url_default = "http://localhost:11434"
+deepseek_model_default = "deepseek-r1:14b"
 
-# Initialize rasa server process
-rasa_server_thread = None
+# Fetch available Ollama models for dropdown
+ollama_models = []
+try:
+    resp = requests.get(f"{ollama_url_default}/api/tags")
+    if resp.status_code == 200:
+        data = resp.json()
+        ollama_models = [m['name'] for m in data.get('models', [])]
+except Exception:
+    ollama_models = [deepseek_model_default]
+if not ollama_models:
+    ollama_models = [deepseek_model_default]
+
+# Use session state to store DeepSeek settings and chatbot instance
+if "deepseek_model_name" not in st.session_state:
+    st.session_state.deepseek_model_name = deepseek_model_default
+if "deepseek_ollama_url" not in st.session_state:
+    st.session_state.deepseek_ollama_url = ollama_url_default
+if "deepseek_chatbot" not in st.session_state:
+    st.session_state.deepseek_chatbot = None
+if "deepseek_last_settings" not in st.session_state:
+    st.session_state.deepseek_last_settings = (deepseek_model_default, ollama_url_default)
+
+# Store chat histories for each engine (now only deepseek)
+if "chat_histories" not in st.session_state:
+    st.session_state.chat_histories = {
+        "deepseek": []
+    }
+if "active_chatbot" not in st.session_state:
+    st.session_state.active_chatbot = "deepseek"
+if "messages" not in st.session_state:
+    st.session_state.messages = st.session_state.chat_histories[st.session_state.active_chatbot]
 
 # Sidebar for navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["Dashboard", "Topic Assessment", "Topic Explorer", "Recommendations", "AI Chatbot", "About"])
 
 if page == "Dashboard":
+    st.title("Learning Path Recommender System")
+    st.markdown("""
+    This system provides personalized learning recommendations for B.Tech CSE fundamentals.
+    It uses both rule-based and collaborative filtering techniques to suggest the most relevant topics.
+    """)
     st.header("Dashboard")
     
     # User selection
@@ -191,6 +219,11 @@ elif page == "Topic Explorer":
         st.write("---")
 
 elif page == "Recommendations":
+    st.title("Learning Path Recommender System")
+    st.markdown("""
+    This system provides personalized learning recommendations for B.Tech CSE fundamentals.
+    It uses both rule-based and collaborative filtering techniques to suggest the most relevant topics.
+    """)
     st.header("Recommendations")
     
     # Option to create a new user or select existing
@@ -255,94 +288,42 @@ elif page == "Recommendations":
             st.warning("No recommendations available. You may have mastered all topics!")
 
 elif page == "AI Chatbot":
-    st.header("AI Learning Assistant")
+    st.title("AI Chatbot Assistant")
+    st.markdown("""
+    Ask any question about computer science topics, and get answers powered by a local large language model (DeepSeek via Ollama).
+    """)
     st.subheader("Ask questions about any CS topic")
     
-    # Chatbot selection
-    chatbot_option = st.radio(
-        "Select Chatbot Engine",
-        ["Original Knowledge-Based Chatbot", "Rasa Open Source Chatbot"]
-    )
+    # Only show DeepSeek Ollama Settings and use DeepSeekChatbot
+    with st.expander("DeepSeek Ollama Settings", expanded=False):
+        model_name = st.selectbox(
+            "Ollama Model Name",
+            ollama_models,
+            index=ollama_models.index(st.session_state.deepseek_model_name) if st.session_state.deepseek_model_name in ollama_models else 0,
+            key="deepseek_model_name_input"
+        )
+        ollama_url = st.text_input("Ollama Server URL", value=st.session_state.deepseek_ollama_url, key="deepseek_ollama_url_input")
+        if model_name != st.session_state.deepseek_model_name:
+            st.session_state.deepseek_model_name = model_name
+        if ollama_url != st.session_state.deepseek_ollama_url:
+            st.session_state.deepseek_ollama_url = ollama_url
+    if (st.session_state.deepseek_model_name, st.session_state.deepseek_ollama_url) != st.session_state.deepseek_last_settings or st.session_state.deepseek_chatbot is None:
+        st.session_state.deepseek_chatbot = DeepSeekChatbot(st.session_state.deepseek_ollama_url, st.session_state.deepseek_model_name)
+        st.session_state.deepseek_last_settings = (st.session_state.deepseek_model_name, st.session_state.deepseek_ollama_url)
+    chatbot = st.session_state.deepseek_chatbot
+    selected_engine = "deepseek"
     
-    # Web search toggle
-    use_web_search = st.toggle("Enable Web Search for Unknown Topics", value=True)
-    
-    # Initialize the selected chatbot if needed
-    if chatbot_option == "Original Knowledge-Based Chatbot":
-        chatbot = original_chatbot
-        chatbot.use_web_search = use_web_search
-        
-        if active_chatbot != "original":
-            # Reset chat if switching chatbot types
-            if "messages" in st.session_state:
-                st.session_state.messages = []
-            active_chatbot = "original"
-            
-    else:  # Rasa chatbot selected
-        if rasa_chatbot is None:
-            # Show initialization message
-            init_placeholder = st.empty()
-            init_placeholder.info("Initializing Rasa chatbot. This may take a minute...")
-            
-            # Initialize and start Rasa server
-            rasa_chatbot = create_rasa_chatbot(use_web_search=use_web_search)
-            
-            # Start the server in a separate thread to prevent blocking the UI
-            def start_rasa_server():
-                success = rasa_chatbot.start_server()
-                if not success:
-                    st.error("Failed to start Rasa server. Using original chatbot as fallback.")
-                    return False
-                return True
-            
-            rasa_server_thread = threading.Thread(target=start_rasa_server)
-            rasa_server_thread.daemon = True
-            rasa_server_thread.start()
-            
-            # Wait for server to start
-            time.sleep(5)
-            init_placeholder.empty()
-        
-        chatbot = rasa_chatbot
-        chatbot.use_web_search = use_web_search
-        
-        if active_chatbot != "rasa":
-            # Reset chat if switching chatbot types
-            if "messages" in st.session_state:
-                st.session_state.messages = []
-            active_chatbot = "rasa"
-    
-    # Information about the chatbot
+    # Remove About this AI Assistant logic for original chatbot, only show DeepSeek info
     with st.expander("About this AI Assistant"):
-        if chatbot_option == "Original Knowledge-Based Chatbot":
-            st.markdown("""
-            This AI assistant uses a curated knowledge base to answer questions about Computer Science topics.
-            
-            **Features:**
-            - Answers questions about definitions, concepts, examples, and related topics
-            - Can search the web for topics not in its knowledge base (when enabled)
-            - Remembers your conversation history
-            
-            **Available Topics:**
-            The assistant has detailed knowledge about core CS topics like Programming, Data Structures, 
-            Algorithms, OOP, Databases, Operating Systems, and advanced topics like Artificial Intelligence, 
-            Machine Learning, Web Development, Cybersecurity, Computer Networks and more.
-            """)
-        else:
-            st.markdown("""
-            This AI assistant uses the Rasa open-source framework to power conversational interactions.
-            
-            **Features:**
-            - More natural conversational flow with context tracking
-            - Intent recognition and entity extraction
-            - Can fall back to web search for unknown topics
-            - Open-source architecture that can be extended and customized
-            
-            **Specialized Topics:**
-            The Rasa assistant is trained specifically on data structures, algorithms, programming basics,
-            and web development, with the ability to learn more topics over time.
-            """)
-            
+        st.markdown("""
+        This AI assistant uses the DeepSeek LLM running locally via Ollama.
+        
+        **Features:**
+        - State-of-the-art large language model (DeepSeek)
+        - No internet required (runs locally via Ollama)
+        - Can answer a wide range of questions, not limited to a fixed knowledge base
+        - Remembers your conversation history (in this session)
+        """)
         st.markdown("""
         **Try asking questions like:**
         - "What is Machine Learning?"
@@ -351,10 +332,6 @@ elif page == "AI Chatbot":
         - "What topics are related to Artificial Intelligence?"
         """)
     
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
     # Display chat messages from history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -362,47 +339,17 @@ elif page == "AI Chatbot":
     
     # Chat input
     if prompt := st.chat_input("Ask me anything about CS topics!"):
-        # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # Display user message in chat container
         with st.chat_message("user"):
             st.markdown(prompt)
-        
-        # Show thinking indicator
         with st.chat_message("assistant"):
             thinking_placeholder = st.empty()
-            thinking_placeholder.markdown("Thinking...")
-            
-            # Generate and display assistant response
-            response = chatbot.generate_response(prompt)
-            thinking_placeholder.empty()
-            st.markdown(response)
-        
-        # Add assistant response to chat history
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    
-    # Sidebar with topic suggestions
-    with st.sidebar:
-        st.markdown("### Topic Suggestions")
-        st.markdown("Try asking about:")
-        
-        if chatbot_option == "Original Knowledge-Based Chatbot":
-            # Display topics from our extended knowledge base
-            for topic in get_extended_knowledge_base().keys():
-                with st.expander(topic):
-                    st.markdown(f"- What is {topic}?")
-                    st.markdown(f"- What are the main concepts in {topic}?")
-                    st.markdown(f"- Give me examples of {topic}")
-                    st.markdown(f"- What topics are related to {topic}?")
-        else:
-            # For Rasa, show the specialized topics it's trained on
-            specialized_topics = ["Data Structures", "Algorithms", "Programming Basics", "Web Development"]
-            for topic in specialized_topics:
-                with st.expander(topic):
-                    st.markdown(f"- What is {topic}?")
-                    st.markdown(f"- Explain {topic}")
-                    st.markdown(f"- Tell me about {topic}")
+            response_text = ""
+            for chunk in chatbot.stream_response(prompt):
+                response_text += chunk
+                thinking_placeholder.markdown(response_text + "▌")
+            thinking_placeholder.markdown(response_text)
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
 
 elif page == "About":
     st.header("About the Learning Recommender System")
@@ -459,15 +406,6 @@ elif page == "About":
     
     - **Advanced NLP with BERT/GPT**: Enhancing the chatbot with state-of-the-art language models for better understanding and responses.
     """)
-
-# Clean up Rasa server when the app stops
-def cleanup():
-    if rasa_chatbot is not None:
-        rasa_chatbot.stop_server()
-
-# Register cleanup to happen at exit
-import atexit
-atexit.register(cleanup)
 
 # Footer
 st.sidebar.markdown("---")
